@@ -76,6 +76,7 @@ if [ "$1" = 'mysqld' -a -z "$wantHelp" ]; then
 	_check_config "$@"
 	# Get config
 	DATADIR="$(_get_config 'datadir' "$@")"
+	VERSION="$(mysql --version|awk '{ print $5 }'|awk -F\, '{ print $1 }')"
 
 	if [ ! -d "$DATADIR/mysql" ]; then
 		file_env 'MYSQL_ROOT_PASSWORD'
@@ -197,6 +198,62 @@ if [ "$1" = 'mysqld' -a -z "$wantHelp" ]; then
 		echo
 		echo 'MySQL init process done. Ready for start up.'
 		echo
+
+		echo "$VERSION" > "$DATADIR/db_version"
+		echo "Database version: $VERSION"
+		echo
+	else
+		echo 'Check for the need to update the MySQL databases';
+		if [ -f "$DATADIR/db_version" ]; then
+			db_version="$(cat "$DATADIR/db_version" 2>/dev/null)"
+		fi
+		if [[ $db_version != $VERSION && -n $VERSION  ]]; then
+			echo "Trying to run upgrade of MySQL databases..."
+			SOCKET="$(_get_config 'socket' "$@")"
+
+			"$@" --skip-networking --socket="${SOCKET}" --skip-grant-tables &
+			pid="$!"
+
+			mysql=( mysql --protocol=socket -uroot -hlocalhost --socket="${SOCKET}" )
+
+			for i in {30..0}; do
+				if echo 'SELECT 1' | "${mysql[@]}" &> /dev/null; then
+					break
+				fi
+				echo 'MySQL upgrade databases process in progress...'
+				sleep 1
+			done
+			if [ "$i" = 0 ]; then
+				echo >&2 'MySQL upgrade databases process failed.'
+				exit 1
+			fi
+
+			# Run upgrade itself
+			echo "Running upgrade itself..."
+			echo "It will do some chek first and report all errors and tries to correct them"
+			echo
+			if /usr/bin/mysql_upgrade --no-defaults --force --socket="${SOCKET}"; then
+				echo "Everything upgraded successfully"
+				echo "$VERSION" > "$DATADIR/db_version"
+				echo "Database version: $VERSION"
+				echo
+			else
+				echo >&2 'MySQL upgrade databases failed.'
+				exit 1
+			fi
+
+			if ! kill -s TERM "$pid" || ! wait "$pid"; then
+				echo >&2 'MySQL upgrade databases process failed.'
+				exit 1
+			fi
+
+			echo
+			echo 'MySQL upgrade databases process done. Ready for start up.'
+			echo
+		else
+			echo "MySQL databases do not need to be upgraded"
+			echo
+		fi
 	fi
 fi
 
